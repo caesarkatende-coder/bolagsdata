@@ -1,0 +1,290 @@
+{
+  "name": "BRREG 2 - Roller",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## BRREG 2: Roller (dagligen 06:45)\n\nKör 06:45, strax efter flöde 1 som skriver company_events 06:00.\n\nFlödet har en **egen markör** i sync_state under nyckeln `brreg_roles_event_id` i stället för att triggas av flöde 1. Skälet: referenser till andra workflow-ID:n överlever inte en import, så en kedjad trigger går sönder direkt. Resultatet blir detsamma, men flödena är frikopplade och kan köras om var för sig.\n\nTomt markörvärde tolkas som 0, vilket betyder att första körningen behandlar allt som redan ligger i company_events.",
+        "height": 260,
+        "width": 620,
+        "color": 5
+      },
+      "id": "a1b2c3d4-0001-4000-8000-000000000001",
+      "name": "Sticky Note",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [-20, 0]
+    },
+    {
+      "parameters": {
+        "content": "## Diffen stänger rader, den raderar aldrig\n\n\"Apply role diff\" kör ett enda atomärt SQL-uttryck: roller som inte längre finns hos BRREG får `valid_to = current_date`, nya roller läggs till med `valid_from = current_date`. Oförändrade roller lämnas i fred, så valid_from bevaras och styrelsehistoriken byggs upp över tid.\n\nOrgnr med 5xx-svar utesluts ur `processed`, så ett serverfel hos BRREG kan aldrig stänga roller av misstag. Statuskod 404 betyder däremot noll roller och stänger allt som är öppet för det orgnret.\n\nObs: markören flyttas fram även när enstaka orgnr gav 5xx. De hämtas då först nästa gång bolaget ändras. Vill du vara strikt, sätt markören bakåt manuellt i sync_state.",
+        "height": 260,
+        "width": 700,
+        "color": 5
+      },
+      "id": "a1b2c3d4-0001-4000-8000-000000000002",
+      "name": "Sticky Note1",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [620, 0]
+    },
+    {
+      "parameters": {
+        "content": "## Engångs-backfill av ett prioriterat segment\n\nNoden \"Backfill segment (manuell)\" är avstängd och ligger utanför kedjan. Så här gör du en engångskörning:\n\n1. Aktivera noden.\n2. Koppla \"Schedule 06:45\" till den, och den till \"Fetch roller\", i stället för \"Changed orgnrs\".\n3. Kör flödet manuellt.\n4. Koppla tillbaka \"Changed orgnrs\" och stäng av noden igen.\n\nFrågan i noden är ett exempel: alla AS med NACE 43 (bygg). Byt villkoret till det segment du vill fylla på. Noden returnerar `max_event_id = 0`, vilket \"Build diff input\" tolkar som backfill och lämnar då markören orörd.",
+        "height": 280,
+        "width": 560,
+        "color": 3
+      },
+      "id": "a1b2c3d4-0001-4000-8000-000000000003",
+      "name": "Sticky Note2",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [340, 620]
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "45 6 * * *"
+            }
+          ]
+        }
+      },
+      "id": "a1b2c3d4-0001-4000-8000-000000000010",
+      "name": "Schedule 06:45",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [0, 320]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "select value from sync_state where key = 'brreg_roles_event_id'",
+        "options": {}
+      },
+      "id": "a1b2c3d4-0001-4000-8000-000000000011",
+      "name": "Get cursor",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [220, 320],
+      "alwaysOutputData": true,
+      "credentials": {
+        "postgres": {
+          "id": "SUPABASE_PG_PLACEHOLDER",
+          "name": "Supabase Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "select orgnr, max(event_id) as max_event_id\nfrom company_events\nwhere event_id >= $1\n  and orgnr is not null\ngroup by orgnr\norder by orgnr",
+        "options": {
+          "queryReplacement": "={{ [ Number($json.value) || 0 ] }}"
+        }
+      },
+      "id": "a1b2c3d4-0001-4000-8000-000000000012",
+      "name": "Changed orgnrs",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [440, 320],
+      "credentials": {
+        "postgres": {
+          "id": "SUPABASE_PG_PLACEHOLDER",
+          "name": "Supabase Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Exempel: engångs-backfill av ett prioriterat segment.\n-- max_event_id = 0 signalerar till \"Build diff input\" att markören inte ska flyttas.\nselect orgnr, 0 as max_event_id\nfrom companies\nwhere org_form_raw = 'AS'\n  and nace_code like '43%'\norder by orgnr",
+        "options": {}
+      },
+      "id": "a1b2c3d4-0001-4000-8000-000000000013",
+      "name": "Backfill segment (manuell)",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [440, 520],
+      "disabled": true,
+      "credentials": {
+        "postgres": {
+          "id": "SUPABASE_PG_PLACEHOLDER",
+          "name": "Supabase Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=https://data.brreg.no/enhetsregisteret/api/enheter/{{ $json.orgnr }}/roller",
+        "sendHeaders": true,
+        "specifyHeaders": "keypair",
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "User-Agent",
+              "value": "brreg-pipeline/1.0 (local n8n)"
+            },
+            {
+              "name": "Accept",
+              "value": "application/json"
+            }
+          ]
+        },
+        "options": {
+          "batching": {
+            "batch": {
+              "batchSize": 5,
+              "batchInterval": 1000
+            }
+          },
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true,
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "id": "a1b2c3d4-0001-4000-8000-000000000014",
+      "name": "Fetch roller",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [660, 320]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Parar ihop HTTP-svaren med orgnr från föregående nod (samma ordning, 1:1).\n// desired   = önskat läge, alla aktiva roller enligt BRREG just nu.\n// processed = orgnr som gick att läsa av (200 eller 404). Bara dessa får stängas.\n\nconst ROLE_MAP = {\n  LEDE: 'styreleder',\n  NEST: 'nestleder',\n  MEDL: 'styremedlem',\n  VARA: 'varamedlem',\n  OBS: 'observator',\n  DAGL: 'daglig_leder',\n  REVI: 'revisor',\n  REGN: 'regnskapsforer',\n  INNH: 'innehaver',\n  KONT: 'kontaktperson',\n  BEST: 'bestyrende_reder',\n  KOMP: 'komplementar',\n  FFOR: 'forretningsforer'\n};\n\n// Normalt kommer orgnr från \"Changed orgnrs\". Vid manuell backfill kopplas\n// \"Backfill segment (manuell)\" in i stället, därav fallbacken.\nlet source;\ntry {\n  source = $('Changed orgnrs').all();\n} catch (err) {\n  source = $('Backfill segment (manuell)').all();\n}\n\nconst responses = $input.all();\n\nif (source.length === 0 || responses.length === 0) {\n  // Inga orgnr att behandla. Tomt svar stoppar diffen och lämnar markören orörd.\n  return [];\n}\n\nconst desired = [];\nconst processed = [];\nlet noRoles = 0;\nlet serverErrors = 0;\n\nfor (let i = 0; i < responses.length; i++) {\n  const orgnr = String(source[i]?.json?.orgnr ?? '').trim();\n  if (!orgnr) continue;\n\n  const res = responses[i]?.json ?? {};\n  const status = Number(res.statusCode);\n\n  if (status >= 500) {\n    // Serverfel hos BRREG. Orgnret utesluts ur processed så att inga roller stängs.\n    serverErrors++;\n    continue;\n  }\n\n  if (status === 404) {\n    // 404 = inga roller registrerade. Räknas som behandlat, alla öppna roller stängs.\n    noRoles++;\n    processed.push(orgnr);\n    continue;\n  }\n\n  if (status !== 200) continue;\n\n  processed.push(orgnr);\n\n  const rollegrupper = res.body?.rollegrupper ?? [];\n\n  for (const gruppe of rollegrupper) {\n    const roller = gruppe?.roller ?? [];\n\n    for (const entry of roller) {\n      if (entry?.fratraadt === true) continue;\n\n      const kode = entry?.type?.kode ?? null;\n      const roleType = ROLE_MAP[kode] ?? (kode ? String(kode).toLowerCase() : null);\n      if (!roleType) continue;\n\n      let personName = null;\n      let birthDate = null;\n      let holderOrgnr = null;\n\n      if (entry.person) {\n        // navn är ett strukturerat objekt i det här API:et, inte en platt sträng.\n        const navn = entry.person.navn ?? {};\n        personName = [navn.fornavn, navn.mellomnavn, navn.etternavn].filter(Boolean).join(' ').trim() || null;\n        birthDate = entry.person.fodselsdato ?? null;\n      } else if (entry.enhet) {\n        holderOrgnr = entry.enhet.organisasjonsnummer != null ? String(entry.enhet.organisasjonsnummer) : null;\n      }\n\n      if (!personName && !holderOrgnr) continue;\n\n      desired.push({\n        company_orgnr: orgnr,\n        role_type: roleType,\n        person_name: personName,\n        birth_date: birthDate,\n        holder_orgnr: holderOrgnr\n      });\n    }\n  }\n}\n\nif (serverErrors > 0 && serverErrors === responses.length) {\n  throw new Error('Samtliga ' + serverErrors + ' anrop mot BRREG gav 5xx. Avbryter så att inga roller stängs felaktigt.');\n}\n\n// Ny markör: högsta event_id i batchen plus ett.\nlet maxEventId = 0;\nfor (const item of source) {\n  const n = Number(item?.json?.max_event_id);\n  if (Number.isFinite(n) && n > maxEventId) maxEventId = n;\n}\n\nlet nextCursor;\nif (maxEventId > 0) {\n  nextCursor = String(maxEventId + 1);\n} else {\n  // Backfill-noden levererar max_event_id = 0. Då skrivs samma markör tillbaka.\n  let current = '';\n  try {\n    current = String($('Get cursor').first().json.value ?? '');\n  } catch (err) {\n    current = '';\n  }\n  nextCursor = current === '' ? '0' : current;\n}\n\nreturn [{\n  json: {\n    desired: JSON.stringify(desired),\n    processed: JSON.stringify(processed),\n    nextCursor: nextCursor,\n    orgnr_in: responses.length,\n    orgnr_processed: processed.length,\n    roles_desired: desired.length,\n    no_roles_404: noRoles,\n    server_errors_5xx: serverErrors\n  }\n}];"
+      },
+      "id": "a1b2c3d4-0001-4000-8000-000000000015",
+      "name": "Build diff input",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [880, 320]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "with input as (\n  select distinct\n    x.company_orgnr,\n    x.role_type,\n    nullif(btrim(x.person_name), '') as person_name,\n    x.birth_date::date as birth_date,\n    nullif(btrim(x.holder_orgnr), '') as holder_orgnr\n  from jsonb_to_recordset($1::jsonb)\n    as x(company_orgnr text, role_type text, person_name text, birth_date text, holder_orgnr text)\n),\ntouched as (\n  select value as orgnr from jsonb_array_elements_text($2::jsonb)\n),\nins_people as (\n  insert into people (name, birth_date)\n  select distinct person_name, birth_date from input where person_name is not null\n  on conflict (name, birth_date) do nothing\n  returning person_id, name, birth_date\n),\nall_people as (\n  select person_id, name, birth_date from ins_people\n  union\n  select p.person_id, p.name, p.birth_date\n  from people p\n  where exists (\n    select 1 from input i\n    where i.person_name = p.name and i.birth_date is not distinct from p.birth_date\n  )\n),\nresolved as (\n  select i.company_orgnr, i.role_type, i.holder_orgnr, ap.person_id\n  from input i\n  left join all_people ap\n    on i.person_name is not null\n   and ap.name = i.person_name\n   and ap.birth_date is not distinct from i.birth_date\n),\nclosed as (\n  update roles r\n  set valid_to = current_date\n  where r.valid_to is null\n    and r.orgnr in (select orgnr from touched)\n    and not exists (\n      select 1 from resolved d\n      where d.company_orgnr = r.orgnr\n        and d.role_type = r.role_type\n        and d.person_id is not distinct from r.person_id\n        and d.holder_orgnr is not distinct from r.holder_orgnr\n    )\n  returning r.role_id\n),\nopened as (\n  insert into roles (orgnr, person_id, holder_orgnr, role_type)\n  select d.company_orgnr, d.person_id, d.holder_orgnr, d.role_type\n  from resolved d\n  where exists (select 1 from companies c where c.orgnr = d.company_orgnr)\n    and not exists (\n      select 1 from roles r\n      where r.orgnr = d.company_orgnr\n        and r.valid_to is null\n        and r.role_type = d.role_type\n        and r.person_id is not distinct from d.person_id\n        and r.holder_orgnr is not distinct from d.holder_orgnr\n    )\n  on conflict do nothing\n  returning role_id\n)\nselect\n  (select count(*) from closed) as roles_closed,\n  (select count(*) from opened) as roles_opened;",
+        "options": {
+          "queryReplacement": "={{ [$json.desired, $json.processed] }}"
+        }
+      },
+      "id": "a1b2c3d4-0001-4000-8000-000000000016",
+      "name": "Apply role diff",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [1100, 320],
+      "credentials": {
+        "postgres": {
+          "id": "SUPABASE_PG_PLACEHOLDER",
+          "name": "Supabase Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "insert into sync_state (key, value, updated_at)\nvalues ('brreg_roles_event_id', $1, now())\non conflict (key) do update\n  set value = excluded.value,\n      updated_at = now()",
+        "options": {
+          "queryReplacement": "={{ [ $('Build diff input').first().json.nextCursor ] }}"
+        }
+      },
+      "id": "a1b2c3d4-0001-4000-8000-000000000017",
+      "name": "Save cursor",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [1320, 320],
+      "credentials": {
+        "postgres": {
+          "id": "SUPABASE_PG_PLACEHOLDER",
+          "name": "Supabase Postgres"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Schedule 06:45": {
+      "main": [
+        [
+          {
+            "node": "Get cursor",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get cursor": {
+      "main": [
+        [
+          {
+            "node": "Changed orgnrs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Changed orgnrs": {
+      "main": [
+        [
+          {
+            "node": "Fetch roller",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Backfill segment (manuell)": {
+      "main": [
+        []
+      ]
+    },
+    "Fetch roller": {
+      "main": [
+        [
+          {
+            "node": "Build diff input",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build diff input": {
+      "main": [
+        [
+          {
+            "node": "Apply role diff",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Apply role diff": {
+      "main": [
+        [
+          {
+            "node": "Save cursor",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Europe/Oslo"
+  },
+  "pinData": {}
+}

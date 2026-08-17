@@ -1,0 +1,18 @@
+# Python 3.14. Install with:
+#   python3 -m venv .venv && source .venv/bin/activate
+#   pip install -r bulk/requirements.txt
+
+# HTTP client for the BRREG downloads and the Regnskapsregisteret calls.
+requests>=2.32.4
+
+# Streaming JSON parser. The Enhetsregisteret dump is one huge JSON array,
+# so it has to be read incrementally instead of json.load().
+ijson>=3.4.0
+
+# Postgres driver, version 3. The binary extra ships prebuilt wheels so no
+# local libpq build is needed. Note: psycopg3 has no execute_values, the
+# scripts use cursor.executemany which psycopg3 pipelines automatically.
+psycopg[binary]>=3.2.9
+
+# Reads bulk/.env so DATABASE_URL does not have to be exported by hand.
+python-dotenv>=1.1.0

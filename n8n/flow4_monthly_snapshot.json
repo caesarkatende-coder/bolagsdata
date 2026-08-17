@@ -1,0 +1,103 @@
+{
+  "name": "BRREG 4 - Månadssnapshot",
+  "nodes": [
+    {
+      "id": "b4-sticky-snapshot",
+      "name": "Note snapshot",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [180, -180],
+      "parameters": {
+        "color": 5,
+        "width": 700,
+        "height": 260,
+        "content": "## Månadssnapshot: en filmruta per månad\n\nKörs 05:00 den 1:a varje månad och fryser hela `companies` som en tidsmaskinsruta. Diffen mellan två månader visar vad som faktiskt förändrats.\n\n**Ensure snapshot table** skapar tabellen om den saknas. **Insert snapshot** skriver in nuläget med `date_trunc('month', now())` som `snapshot_month`.\n\nSäkert att köra om: `on conflict (orgnr, snapshot_month) do nothing` gör att en andra körning samma månad inte ändrar något.\n\nObs: originalspecens `like companies including all` hade kopierat primärnyckeln på `orgnr` och kraschat vid månad 2. Här används `including defaults` plus en sammansatt primärnyckel `(orgnr, snapshot_month)`, precis som i sql/schema.sql."
+      }
+    },
+    {
+      "id": "b4-schedule",
+      "name": "Schedule månadsvis",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.3,
+      "position": [0, 300],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 5 1 * *"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "b4-ensure-table",
+      "name": "Ensure snapshot table",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [220, 300],
+      "parameters": {
+        "resource": "database",
+        "operation": "executeQuery",
+        "query": "create table if not exists companies_snapshot (like companies including defaults, snapshot_month date not null, primary key (orgnr, snapshot_month))",
+        "options": {}
+      },
+      "credentials": {
+        "postgres": {
+          "id": "SUPABASE_PG_PLACEHOLDER",
+          "name": "Supabase Postgres"
+        }
+      }
+    },
+    {
+      "id": "b4-insert-snapshot",
+      "name": "Insert snapshot",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [440, 300],
+      "parameters": {
+        "resource": "database",
+        "operation": "executeQuery",
+        "query": "insert into companies_snapshot select c.*, date_trunc('month', now())::date from companies c on conflict (orgnr, snapshot_month) do nothing",
+        "options": {}
+      },
+      "credentials": {
+        "postgres": {
+          "id": "SUPABASE_PG_PLACEHOLDER",
+          "name": "Supabase Postgres"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Schedule månadsvis": {
+      "main": [
+        [
+          {
+            "node": "Ensure snapshot table",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ensure snapshot table": {
+      "main": [
+        [
+          {
+            "node": "Insert snapshot",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Europe/Oslo"
+  },
+  "pinData": {}
+}

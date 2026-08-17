@@ -1,0 +1,76 @@
+{
+  "name": "BRREG Error Handler",
+  "nodes": [
+    {
+      "id": "err-sticky",
+      "name": "Note felhantering",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [180, -180],
+      "parameters": {
+        "color": 3,
+        "width": 700,
+        "height": 260,
+        "content": "## Gemensam felhanterare för BRREG-flödena\n\n**Format error** plockar ut det som behövs för ett larm: workflow, nod, felmeddelande, länk till körningen och tidsstämpel.\n\nKoppla in en Slack-nod (Send Message) eller en Gmail-nod (Send) efter **TODO: Notis** och mappa in fälten från Format error. Ta bort NoOp-noden när notisen är på plats.\n\nVIKTIGT efter import: varje BRREG-flöde måste peka hit under Settings, Error Workflow. Gör det i BRREG 1 och BRREG 4, annars märks aldrig ett fel. Kom också ihåg att välja om Postgres-credentialen i alla noder efter import."
+      }
+    },
+    {
+      "id": "err-trigger",
+      "name": "Error Trigger",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [0, 300],
+      "parameters": {}
+    },
+    {
+      "id": "err-format",
+      "name": "Format error",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [220, 300],
+      "parameters": {
+        "language": "javaScript",
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Plockar ut det som behövs för ett larm, oavsett vilket BRREG-flöde som kraschade.\nreturn [{\n  json: {\n    workflow: $json.workflow?.name,\n    node: $json.execution?.lastNodeExecuted,\n    message: $json.execution?.error?.message,\n    executionUrl: $json.execution?.url,\n    time: new Date().toISOString(),\n  },\n}];"
+      }
+    },
+    {
+      "id": "err-noop",
+      "name": "TODO: Notis",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [440, 300],
+      "parameters": {}
+    }
+  ],
+  "connections": {
+    "Error Trigger": {
+      "main": [
+        [
+          {
+            "node": "Format error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format error": {
+      "main": [
+        [
+          {
+            "node": "TODO: Notis",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Europe/Oslo"
+  },
+  "pinData": {}
+}

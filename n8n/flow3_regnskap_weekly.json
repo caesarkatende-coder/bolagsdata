@@ -1,0 +1,190 @@
+{
+  "name": "BRREG 3 - Regnskap veckovis",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## BRREG 3: Regnskap (söndagar 07:00)\n\nToppar upp räkenskaper för AS och ASA som haft en händelse den senaste veckan. Fönstret är åtta dagar och inte sju, så att en missad körning täcks upp nästa gång.\n\nDen stora årliga batchen över hela beståndet körs **inte** här, den ligger i `bulk/regnskap_batch.py`. Det här flödet är bara löpande påfyllning.",
+        "height": 240,
+        "width": 620,
+        "color": 5
+      },
+      "id": "b2c3d4e5-0003-4000-8000-000000000001",
+      "name": "Sticky Note",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [-20, 0]
+    },
+    {
+      "parameters": {
+        "content": "## 404 betyder inga inlämnade räkenskaper\n\nNystartade och vilande bolag saknar räkenskaper i registret. Statuskod 404 och 410 hoppas därför över utan att räknas som fel.\n\nBara 5xx räknas som serverfel. Om samtliga anrop ger 5xx avbryts körningen med ett fel, annars fortsätter flödet med de bolag som svarade.\n\nEn rad skrivs per (orgnr, år). Finns både bolags- och koncernräkenskap för samma år vinner bolagsräkenskapen (regnskapstype SELSKAP).",
+        "height": 240,
+        "width": 620,
+        "color": 5
+      },
+      "id": "b2c3d4e5-0003-4000-8000-000000000002",
+      "name": "Sticky Note1",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [620, 0]
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 7 * * 0"
+            }
+          ]
+        }
+      },
+      "id": "b2c3d4e5-0003-4000-8000-000000000010",
+      "name": "Schedule söndag 07:00",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [0, 320]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "select distinct e.orgnr\nfrom company_events e\njoin companies c on c.orgnr = e.orgnr\nwhere e.event_time >= now() - interval '8 days'\n  and c.org_form_raw in ('AS','ASA')\norder by 1",
+        "options": {}
+      },
+      "id": "b2c3d4e5-0003-4000-8000-000000000011",
+      "name": "AS med händelser",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [220, 320],
+      "credentials": {
+        "postgres": {
+          "id": "SUPABASE_PG_PLACEHOLDER",
+          "name": "Supabase Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=https://data.brreg.no/regnskapsregisteret/regnskap/{{ $json.orgnr }}",
+        "sendHeaders": true,
+        "specifyHeaders": "keypair",
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "User-Agent",
+              "value": "brreg-pipeline/1.0 (local n8n)"
+            },
+            {
+              "name": "Accept",
+              "value": "application/json"
+            }
+          ]
+        },
+        "options": {
+          "batching": {
+            "batch": {
+              "batchSize": 5,
+              "batchInterval": 1000
+            }
+          },
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true,
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "id": "b2c3d4e5-0003-4000-8000-000000000012",
+      "name": "Fetch regnskap",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [440, 320]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Plockar ut nyckeltal ur BRREG:s regnskapsregister.\n// Svaren paras ihop med orgnr från föregående nod, samma ordning, 1:1.\n\nconst source = $('AS med händelser').all();\nconst responses = $input.all();\n\nif (source.length === 0 || responses.length === 0) {\n  return [];\n}\n\n// En rad per (orgnr, år). Bolagsräkenskapen vinner över koncernräkenskapen.\nconst byKey = new Map();\nlet noAccounts = 0;\nlet serverErrors = 0;\n\nfor (let i = 0; i < responses.length; i++) {\n  const orgnr = String(source[i]?.json?.orgnr ?? '').trim();\n  if (!orgnr) continue;\n\n  const res = responses[i]?.json ?? {};\n  const status = Number(res.statusCode);\n\n  if (status === 404 || status === 410) {\n    // Normalt för nystartade eller vilande bolag. Inte ett fel.\n    noAccounts++;\n    continue;\n  }\n\n  if (status >= 500) {\n    serverErrors++;\n    continue;\n  }\n\n  if (status !== 200) continue;\n\n  const body = res.body;\n  const statements = Array.isArray(body) ? body : (body ? [body] : []);\n\n  for (const entry of statements) {\n    const tilDato = String(entry?.regnskapsperiode?.tilDato ?? '');\n    const year = parseInt(tilDato.slice(0, 4), 10);\n    if (Number.isNaN(year)) continue;\n\n    const resultat = entry?.resultatregnskapResultat ?? {};\n    const drift = resultat?.driftsresultat ?? {};\n\n    const row = {\n      orgnr: orgnr,\n      year: year,\n      currency: entry?.valuta ?? 'NOK',\n      revenue: drift?.driftsinntekter?.sumDriftsinntekter ?? null,\n      ebit: drift?.driftsresultat ?? null,\n      net_result: resultat?.aarsresultat ?? null,\n      equity: entry?.egenkapitalGjeld?.egenkapital?.sumEgenkapital ?? null,\n      debt: entry?.egenkapitalGjeld?.gjeldOversikt?.sumGjeld ?? null,\n      assets: entry?.eiendeler?.sumEiendeler ?? null,\n      raw: JSON.stringify(entry)\n    };\n\n    const key = orgnr + '|' + year;\n    const isSelskap = String(entry?.regnskapstype ?? '').toUpperCase() === 'SELSKAP';\n    const existing = byKey.get(key);\n\n    if (!existing || (isSelskap && !existing.isSelskap)) {\n      byKey.set(key, { row: row, isSelskap: isSelskap });\n    }\n  }\n}\n\nif (serverErrors > 0 && serverErrors === responses.length) {\n  throw new Error('Samtliga ' + serverErrors + ' anrop mot regnskapsregisteret gav 5xx. Avbryter körningen.');\n}\n\nconsole.log('regnskap: ' + responses.length + ' orgnr in, ' + byKey.size + ' rader ut, ' + noAccounts + ' utan räkenskaper, ' + serverErrors + ' serverfel');\n\nconst out = [];\nfor (const value of byKey.values()) {\n  out.push({ json: value.row });\n}\nreturn out;"
+      },
+      "id": "b2c3d4e5-0003-4000-8000-000000000013",
+      "name": "Map financials",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [660, 320]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "insert into financials (orgnr, year, currency, revenue, ebit, net_result, equity, debt, assets, raw)\nvalues ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb)\non conflict (orgnr, year) do update\n  set currency = excluded.currency,\n      revenue = excluded.revenue,\n      ebit = excluded.ebit,\n      net_result = excluded.net_result,\n      equity = excluded.equity,\n      debt = excluded.debt,\n      assets = excluded.assets,\n      raw = excluded.raw",
+        "options": {
+          "queryReplacement": "={{ [$json.orgnr, $json.year, $json.currency, $json.revenue, $json.ebit, $json.net_result, $json.equity, $json.debt, $json.assets, $json.raw] }}"
+        }
+      },
+      "id": "b2c3d4e5-0003-4000-8000-000000000014",
+      "name": "Upsert financials",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [880, 320],
+      "credentials": {
+        "postgres": {
+          "id": "SUPABASE_PG_PLACEHOLDER",
+          "name": "Supabase Postgres"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Schedule söndag 07:00": {
+      "main": [
+        [
+          {
+            "node": "AS med händelser",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AS med händelser": {
+      "main": [
+        [
+          {
+            "node": "Fetch regnskap",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch regnskap": {
+      "main": [
+        [
+          {
+            "node": "Map financials",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Map financials": {
+      "main": [
+        [
+          {
+            "node": "Upsert financials",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Europe/Oslo"
+  },
+  "pinData": {}
+}

@@ -1,0 +1,530 @@
+{
+  "name": "BRREG 1 - Dagliga ändringar",
+  "nodes": [
+    {
+      "id": "b1-sticky-cursor",
+      "name": "Note cursor",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [180, -180],
+      "parameters": {
+        "color": 4,
+        "width": 700,
+        "height": 220,
+        "content": "## Cursor + hämta ändringar\n\n1. **Get cursor** läser `sync_state.brreg_oppdateringsid`. Noden har `alwaysOutputData` så att en tom tabell inte stoppar flödet.\n2. **Build URL** bygger anropet: tomt cursor-värde ger `?dato=<igår>` (första körningen), annars `?oppdateringsid=<cursor>`. Alltid `size=500`.\n3. **Fetch updates** följer `_links.next.href` tills den saknas (300 ms mellan sidor, ingen sidgräns)."
+      }
+    },
+    {
+      "id": "b1-sticky-events",
+      "name": "Note händelselogg",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [860, -180],
+      "parameters": {
+        "color": 3,
+        "width": 660,
+        "height": 220,
+        "content": "## Händelselogg, append-only\n\n**Flatten events** plockar ut `_embedded.oppdaterteEnheter` från alla sidor.\n\n**Insert events** skriver varje händelse till `company_events` med `on conflict (event_id) do nothing`, så en omkörning aldrig dubblerar historiken. Raderas aldrig.\n\n**Unique orgnr** deduplicerar per organisationsnummer och markerar `deleted` om någon händelse var Sletting eller Fjerning."
+      }
+    },
+    {
+      "id": "b1-sticky-enrich",
+      "name": "Note berika",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [1520, -180],
+      "parameters": {
+        "color": 5,
+        "width": 1080,
+        "height": 220,
+        "content": "## Berika och upsert:a bolag, 5 anrop/s\n\n**Fetch enhet** hämtar full enhet per orgnr. Batching (5 poster per batch, 1000 ms paus) håller oss runt 5 anrop/s. `neverError` + `fullResponse` gör att varje svar bär både `body` och `statusCode`, och att ordningen matchar indata 1:1.\n\n**Map to companies** parar ihop svar med orgnr via index, mappar organisationsform och sätter status (`aktiv`, `konkurs`, `under_avveckling`, `upphörd`). 404/410 blir statusuppdatering, andra 4xx/5xx kastar fel så felflödet larmar.\n\n**Status only?** delar upp: raderade bolag markeras `upphörd`, övriga upsert:as med alla fält. **Merge** för ihop grenarna igen."
+      }
+    },
+    {
+      "id": "b1-sticky-savecursor",
+      "name": "Note spara cursor",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [2620, -180],
+      "parameters": {
+        "color": 6,
+        "width": 480,
+        "height": 220,
+        "content": "## Cursorn skrivs sist\n\nCursorn skrivs sist: kraschad körning kan köras om utan dataförlust.\n\nAPI:t tolkar `oppdateringsid` som större än eller lika med, därför sparas `max + 1`. Eventuell överlappning är ofarlig eftersom `company_events.event_id` är primärnyckel."
+      }
+    },
+    {
+      "id": "b1-schedule",
+      "name": "Schedule 06:00",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.3,
+      "position": [0, 300],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 6 * * *"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "b1-get-cursor",
+      "name": "Get cursor",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [220, 300],
+      "alwaysOutputData": true,
+      "parameters": {
+        "resource": "database",
+        "operation": "executeQuery",
+        "query": "select value from sync_state where key = 'brreg_oppdateringsid'",
+        "options": {}
+      },
+      "credentials": {
+        "postgres": {
+          "id": "SUPABASE_PG_PLACEHOLDER",
+          "name": "Supabase Postgres"
+        }
+      }
+    },
+    {
+      "id": "b1-build-url",
+      "name": "Build URL",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [440, 300],
+      "parameters": {
+        "language": "javaScript",
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Bygger URL till Enhetsregisterets oppdateringsfeed.\n// Tomt eller saknat cursor-värde betyder att flödet aldrig har kört förut.\nconst rows = $input.all();\nconst cursor = String(rows[0]?.json?.value ?? '').trim();\nconst base = 'https://data.brreg.no/enhetsregisteret/api/oppdateringer/enheter';\n\nlet url;\nif (cursor === '') {\n  // Första körningen: hämta allt från och med igår (dygnet trunkerat till datum).\n  const since = new Date(Date.now() - 24 * 60 * 60 * 1000);\n  const day = since.toISOString().slice(0, 10);\n  url = base + '?dato=' + day + 'T00:00:00.000Z' + '&size=500';\n} else {\n  url = base + '?oppdateringsid=' + cursor + '&size=500';\n}\n\nreturn [{ json: { url } }];"
+      }
+    },
+    {
+      "id": "b1-fetch-updates",
+      "name": "Fetch updates",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [660, 300],
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $json.url }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "User-Agent",
+              "value": "brreg-pipeline/1.0 (local n8n)"
+            },
+            {
+              "name": "Accept",
+              "value": "application/json"
+            }
+          ]
+        },
+        "options": {
+          "pagination": {
+            "pagination": {
+              "paginationMode": "responseContainsNextURL",
+              "nextURL": "={{ $response.body._links?.next?.href }}",
+              "paginationCompleteWhen": "other",
+              "completeExpression": "={{ !$response.body._links?.next?.href }}",
+              "limitPagesFetched": false,
+              "requestInterval": 300
+            }
+          },
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "b1-flatten-events",
+      "name": "Flatten events",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [880, 300],
+      "parameters": {
+        "language": "javaScript",
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Varje sida från pagineringen är ett item. Platta ut till en händelse per item.\nreturn $input.all().flatMap(i => i.json?._embedded?.oppdaterteEnheter ?? []).map(e => ({json: e}));"
+      }
+    },
+    {
+      "id": "b1-insert-events",
+      "name": "Insert events",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [1100, 300],
+      "parameters": {
+        "resource": "database",
+        "operation": "executeQuery",
+        "query": "insert into company_events (event_id, orgnr, event_type, event_time, raw) values ($1, $2, $3, $4, $5::jsonb) on conflict (event_id) do nothing",
+        "options": {
+          "queryReplacement": "={{ [$json.oppdateringsid, $json.organisasjonsnummer, $json.endringstype, $json.dato, JSON.stringify($json)] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "SUPABASE_PG_PLACEHOLDER",
+          "name": "Supabase Postgres"
+        }
+      }
+    },
+    {
+      "id": "b1-unique-orgnr",
+      "name": "Unique orgnr",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1320, 300],
+      "parameters": {
+        "language": "javaScript",
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Läser händelserna direkt från Flatten events, inte från Postgres-svaret.\nconst events = $('Flatten events').all();\nconst byOrgnr = new Map();\n\nfor (const item of events) {\n  const e = item.json ?? {};\n  const orgnr = e.organisasjonsnummer;\n  if (!orgnr) continue;\n\n  const isDeleted = e.endringstype === 'Sletting' || e.endringstype === 'Fjerning';\n  const existing = byOrgnr.get(orgnr);\n  if (existing) {\n    existing.deleted = existing.deleted || isDeleted;\n  } else {\n    byOrgnr.set(orgnr, { organisasjonsnummer: orgnr, deleted: isDeleted });\n  }\n}\n\nif (byOrgnr.size === 0) return [];\n\nreturn [...byOrgnr.values()].map(v => ({ json: v }));"
+      }
+    },
+    {
+      "id": "b1-fetch-enhet",
+      "name": "Fetch enhet",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [1540, 300],
+      "parameters": {
+        "method": "GET",
+        "url": "=https://data.brreg.no/enhetsregisteret/api/enheter/{{ $json.organisasjonsnummer }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "User-Agent",
+              "value": "brreg-pipeline/1.0 (local n8n)"
+            },
+            {
+              "name": "Accept",
+              "value": "application/json"
+            }
+          ]
+        },
+        "options": {
+          "batching": {
+            "batch": {
+              "batchSize": 5,
+              "batchInterval": 1000
+            }
+          },
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true,
+              "responseFormat": "json"
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "b1-map-companies",
+      "name": "Map to companies",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1760, 300],
+      "parameters": {
+        "language": "javaScript",
+        "mode": "runOnceForAllItems",
+        "jsCode": "// HTTP-noden behåller ordningen 1:1 när neverError är på, så vi parar ihop på index.\nconst sources = $('Unique orgnr').all();\nconst items = $input.all();\n\nconst FORM_MAP = {\n  AS: 'aktiebolag',\n  ASA: 'publikt_aktiebolag',\n  ENK: 'enskild_firma',\n  NUF: 'filial',\n};\n\nconst out = [];\n\nfor (let i = 0; i < items.length; i++) {\n  const res = items[i].json ?? {};\n  const src = sources[i]?.json ?? {};\n  const b = res.body ?? {};\n  const orgnr = src.organisasjonsnummer ?? b.organisasjonsnummer ?? null;\n  const deleted = src.deleted === true;\n  const statusCode = Number(res.statusCode ?? 200);\n\n  // Borttaget hos BRREG, eller raderat utan kropp att mappa: bara statusuppdatering.\n  if (statusCode === 404 || statusCode === 410 || (deleted && !b.organisasjonsnummer)) {\n    out.push({ json: { orgnr, statusOnly: true } });\n    continue;\n  }\n\n  // Övriga fel ska synas i felflödet, inte tystas.\n  if (statusCode >= 400) {\n    throw new Error('BRREG-anropet misslyckades för orgnr ' + orgnr + ' med statuskod ' + statusCode);\n  }\n\n  const orgFormRaw = b.organisasjonsform?.kode ?? null;\n  const orgForm = FORM_MAP[orgFormRaw] ?? orgFormRaw?.toLowerCase() ?? null;\n\n  const status = b.slettedato\n    ? 'upphörd'\n    : b.konkurs\n      ? 'konkurs'\n      : (b.underAvvikling || b.underTvangsavviklingEllerTvangsopplosning)\n        ? 'under_avveckling'\n        : 'aktiv';\n\n  out.push({\n    json: {\n      orgnr: b.organisasjonsnummer ?? orgnr,\n      name: b.navn ?? null,\n      org_form: orgForm,\n      org_form_raw: orgFormRaw,\n      nace_code: b.naeringskode1?.kode ?? null,\n      founded: b.stiftelsesdato ?? null,\n      employees: b.antallAnsatte ?? null,\n      municipality: b.forretningsadresse?.kommune ?? null,\n      address: b.forretningsadresse ? JSON.stringify(b.forretningsadresse) : null,\n      status,\n      website: b.hjemmeside ?? null,\n      raw: JSON.stringify(b),\n      statusOnly: false,\n    },\n  });\n}\n\nreturn out;"
+      }
+    },
+    {
+      "id": "b1-status-only",
+      "name": "Status only?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [1980, 300],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "b1-cond-status-only",
+              "leftValue": "={{ $json.statusOnly }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": false,
+        "options": {}
+      }
+    },
+    {
+      "id": "b1-mark-upphord",
+      "name": "Mark upphörd",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [2200, 140],
+      "parameters": {
+        "resource": "database",
+        "operation": "executeQuery",
+        "query": "update companies set status = 'upphörd', last_updated = now() where orgnr = $1",
+        "options": {
+          "queryReplacement": "={{ [$json.orgnr] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "SUPABASE_PG_PLACEHOLDER",
+          "name": "Supabase Postgres"
+        }
+      }
+    },
+    {
+      "id": "b1-upsert-company",
+      "name": "Upsert company",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [2200, 460],
+      "parameters": {
+        "resource": "database",
+        "operation": "executeQuery",
+        "query": "insert into companies (orgnr, name, org_form, org_form_raw, nace_code, founded, employees, municipality, address, status, website, raw, last_updated)\nvalues ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10,$11,$12::jsonb, now())\non conflict (orgnr) do update set name=excluded.name, org_form=excluded.org_form, org_form_raw=excluded.org_form_raw, nace_code=excluded.nace_code, founded=excluded.founded, employees=excluded.employees, municipality=excluded.municipality, address=excluded.address, status=excluded.status, website=excluded.website, raw=excluded.raw, last_updated=now()",
+        "options": {
+          "queryReplacement": "={{ [$json.orgnr, $json.name, $json.org_form, $json.org_form_raw, $json.nace_code, $json.founded, $json.employees, $json.municipality, $json.address, $json.status, $json.website, $json.raw] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "SUPABASE_PG_PLACEHOLDER",
+          "name": "Supabase Postgres"
+        }
+      }
+    },
+    {
+      "id": "b1-merge",
+      "name": "Merge",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [2420, 300],
+      "parameters": {
+        "mode": "append",
+        "numberInputs": 2,
+        "options": {}
+      }
+    },
+    {
+      "id": "b1-new-cursor",
+      "name": "New cursor",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2640, 300],
+      "parameters": {
+        "language": "javaScript",
+        "mode": "runOnceForAllItems",
+        "jsCode": "// API-parametern oppdateringsid är större än eller lika med, därför max + 1.\n// Överlappning är ofarlig eftersom company_events.event_id är primärnyckel.\nconst events = $('Flatten events').all();\nif (events.length === 0) return [];\n\nlet max = 0;\nfor (const item of events) {\n  const id = Number(item.json?.oppdateringsid);\n  if (Number.isFinite(id) && id > max) max = id;\n}\n\n// Inget giltigt id hittat: rör inte cursorn.\nif (max === 0) return [];\n\nreturn [{ json: { next: String(max + 1) } }];"
+      }
+    },
+    {
+      "id": "b1-save-cursor",
+      "name": "Save cursor",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [2860, 300],
+      "parameters": {
+        "resource": "database",
+        "operation": "executeQuery",
+        "query": "insert into sync_state (key, value, updated_at) values ('brreg_oppdateringsid', $1, now()) on conflict (key) do update set value = excluded.value, updated_at = now()",
+        "options": {
+          "queryReplacement": "={{ [$json.next] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "SUPABASE_PG_PLACEHOLDER",
+          "name": "Supabase Postgres"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Schedule 06:00": {
+      "main": [
+        [
+          {
+            "node": "Get cursor",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get cursor": {
+      "main": [
+        [
+          {
+            "node": "Build URL",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build URL": {
+      "main": [
+        [
+          {
+            "node": "Fetch updates",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch updates": {
+      "main": [
+        [
+          {
+            "node": "Flatten events",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Flatten events": {
+      "main": [
+        [
+          {
+            "node": "Insert events",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Insert events": {
+      "main": [
+        [
+          {
+            "node": "Unique orgnr",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Unique orgnr": {
+      "main": [
+        [
+          {
+            "node": "Fetch enhet",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch enhet": {
+      "main": [
+        [
+          {
+            "node": "Map to companies",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Map to companies": {
+      "main": [
+        [
+          {
+            "node": "Status only?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Status only?": {
+      "main": [
+        [
+          {
+            "node": "Mark upphörd",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Upsert company",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mark upphörd": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Upsert company": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Merge": {
+      "main": [
+        [
+          {
+            "node": "New cursor",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "New cursor": {
+      "main": [
+        [
+          {
+            "node": "Save cursor",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Europe/Oslo"
+  },
+  "pinData": {}
+}
